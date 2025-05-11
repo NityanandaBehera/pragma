@@ -7,8 +7,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 from .models import Product, Order, OrderItem
-from .serializers import OrderSerializer
+from .serializers import OrderSerializer,ProductSerializer
 from .discounts import calculate_discounts
+from rest_framework.exceptions import ValidationError
 
 # Create your views here.
 
@@ -46,24 +47,45 @@ class CreateOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        items = request.data.get('items')
-        if not items:
-            return Response({'error': 'No items provided'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            items = request.data.get('items')
+            if not items:
+                raise ValidationError("No items provided.")
 
-        order_items = []
-        for item in items:
-            try:
-                product = Product.objects.get(id=item['product_id'])
-                quantity = int(item['quantity'])
-                order_items.append({'product': product, 'quantity': quantity})
-            except (Product.DoesNotExist, KeyError, ValueError):
-                return Response({'error': 'Invalid product or quantity'}, status=status.HTTP_400_BAD_REQUEST)
+            order_items = []
+            for item in items:
+                try:
+                    product = Product.objects.get(id=item['product_id'])
+                    quantity = int(item['quantity'])
+                    if quantity <= 0:
+                        raise ValidationError("Quantity must be greater than 0.")
+                    order_items.append({'product': product, 'quantity': quantity})
+                except Product.DoesNotExist:
+                    raise ValidationError(f"Product with ID {item.get('product_id')} does not exist.")
+                except (KeyError, ValueError):
+                    raise ValidationError("Invalid product or quantity format.")
 
-        final_total, discounts = calculate_discounts(request.user, order_items)
+            final_total, discounts = calculate_discounts(request.user, order_items)
 
-        order = Order.objects.create(user=request.user, total=final_total, discounts=discounts)
-        for item in order_items:
-            OrderItem.objects.create(order=order, product=item['product'], quantity=item['quantity'])
+            order = Order.objects.create(user=request.user, total=final_total, discounts=discounts)
+            for item in order_items:
+                OrderItem.objects.create(order=order, product=item['product'], quantity=item['quantity'])
 
-        serializer = OrderSerializer(order)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)        
+            serializer = OrderSerializer(order)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        except ValidationError as e:
+            return Response({'error': str(e.detail if hasattr(e, 'detail') else str(e))}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)       
+    
+class ProductListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            products = Product.objects.select_related('category').all()
+            serializer = ProductSerializer(products, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            return Response({'error': 'Unable to fetch products'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)   
